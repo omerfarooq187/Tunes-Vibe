@@ -48,17 +48,20 @@ fun MainScreen(navController: NavHostController) {
             itemsIndexed(audiosList) { index, audio ->
 
                 AudioItem(
-                    index = index+1,
+                    index = index + 1,
                     title = audio.title,
                     artist = audio.artist,
                     albumUri = audio.albumArtUri
                 ) {
-                    navController.navigate(PlaybackScreenRoute(
-                        title = audio.title,
-                        artist = audio.artist,
-                        data = audio.data,
-                        albumArtString = audio.albumArtUri.toString()
-                    ))
+                    navController.navigate(
+                        PlaybackScreenRoute(
+                            index = index,
+                            title = audio.title,
+                            artist = audio.artist,
+                            data = audio.data,
+                            albumArtString = audio.albumArtUri.toString()
+                        )
+                    )
                 }
             }
         }
@@ -70,10 +73,9 @@ fun AudioItem(
     index: Int,
     title: String,
     artist: String,
-    albumUri:Uri?,
-    onItemSelected: ()->Unit
+    albumUri: Uri?,
+    onItemSelected: () -> Unit
 ) {
-
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier

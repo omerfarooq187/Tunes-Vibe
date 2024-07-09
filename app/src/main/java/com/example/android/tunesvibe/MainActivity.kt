@@ -24,6 +24,7 @@ import kotlinx.serialization.Serializable
 object MainScreenRoute
 @Serializable
 data class PlaybackScreenRoute(
+    val index: Int,
     val title: String,
     val artist: String,
     val data:String,

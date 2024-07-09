@@ -7,8 +7,10 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
 import android.os.IBinder
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,6 +39,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,23 +59,30 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.rememberAsyncImagePainter
 import com.example.android.tunesvibe.PlaybackScreenRoute
 import com.example.android.tunesvibe.R
 import com.example.android.tunesvibe.service.AudioService
+import com.example.android.tunesvibe.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaybackScreen(args: PlaybackScreenRoute) {
+    val mainViewModel: MainViewModel = hiltViewModel()
+    val audiosList by mainViewModel.audiosList.collectAsState()
     val serviceConnection = remember {
         ServiceConnectionHolder()
     }
-    val title by remember {
+    var title by remember {
         mutableStateOf(args.title)
     }
-    val artist by remember {
+    var artist by remember {
         mutableStateOf(args.artist)
+    }
+    var currentSongIndex by remember {
+        mutableIntStateOf(args.index)
     }
     val albumArtString by remember {
         mutableStateOf(args.albumArtString)
@@ -88,10 +99,14 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
     var currentPosition by remember {
         mutableIntStateOf(0)
     }
+    var isPlaying by remember {
+        mutableStateOf(false)
+    }
     val context = LocalContext.current
+    val intent = Intent(context, AudioService::class.java)
     LaunchedEffect(Unit) {
-        val intent = Intent(context, AudioService::class.java)
         intent.putExtra("songUri", args.data)
+        intent.putExtra("index", currentSongIndex)
         intent.action = AudioService.ACTIONS.PLAY.toString()
         context.startService(intent)
         context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
@@ -120,6 +135,23 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                     }
                 }
             }
+            scope.launch {
+                audioService?.let {
+                    it.isPlaying.collect { isAudioPlaying ->
+                        isPlaying = isAudioPlaying
+                    }
+                }
+            }
+            scope.launch {
+                audioService?.let {
+                    it.currentSongIndex.collect { newIndex ->
+                        currentSongIndex = newIndex
+                        title = audiosList[currentSongIndex].title
+                        artist = audiosList[currentSongIndex].artist
+                        albumArtUri = audiosList[currentSongIndex].albumArtUri
+                    }
+                }
+            }
         }
     }
 
@@ -135,6 +167,7 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                         fontFamily = FontFamily(Font(R.font.quicksand)),
                         textAlign = TextAlign.Center,
                         modifier = Modifier
+                            .padding(end = 40.dp)
                             .fillMaxWidth()
                     )
                 },
@@ -161,31 +194,6 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-//            Row(
-//                verticalAlignment = Alignment.CenterVertically,
-//                modifier = Modifier
-//                    .fillMaxWidth()
-//                    .padding(horizontal = 8.dp)
-//            ) {
-//                Icon(
-//                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-//                    contentDescription = "",
-//                    modifier = Modifier
-//                        .height(30.dp)
-//                        .width(40.dp)
-//                )
-//                Text(
-//                    text = "Now Playing",
-//                    color = Color.Black,
-//                    fontSize = 22.sp,
-//                    fontWeight = FontWeight.Bold,
-//                    fontFamily = FontFamily(Font(R.font.quicksand)),
-//                    textAlign = TextAlign.Center,
-//                    modifier = Modifier
-//                        .padding(16.dp)
-//                        .weight(1f)
-//                )
-//            }
             if (albumArtUri != null) {
                 Image(
                     painter = rememberAsyncImagePainter(model = albumArtUri),
@@ -239,7 +247,7 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = 16.dp)
             ) {
                 Text(
                     text = currentPosition.toMinutesAndSeconds()
@@ -259,15 +267,28 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                     tint = Color.Black,
                     modifier = Modifier
                         .size(40.dp)
-                        .weight(1.5f)
+                        .weight(1.7f)
+                        .clickable {
+                            intent.action = AudioService.ACTIONS.SKIP_PREVIOUS.toString()
+                            context.startService(intent)
+                        }
                 )
                 Icon(
-                    imageVector = Icons.Default.Pause,
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = "",
                     tint = Color.Black,
                     modifier = Modifier
                         .size(40.dp)
                         .weight(2f)
+                        .clickable {
+                            if (isPlaying) {
+                                intent.action = AudioService.ACTIONS.PAUSE.toString()
+                                context.startService(intent)
+                            } else {
+                                intent.action = AudioService.ACTIONS.RESUME.toString()
+                                context.startService(intent)
+                            }
+                        }
                 )
                 Icon(
                     imageVector = Icons.Default.SkipNext,
@@ -275,7 +296,11 @@ fun PlaybackScreen(args: PlaybackScreenRoute) {
                     tint = Color.Black,
                     modifier = Modifier
                         .size(40.dp)
-                        .weight(1.5f)
+                        .weight(1.7f)
+                        .clickable {
+                            intent.action = AudioService.ACTIONS.SKIP_NEXT.toString()
+                            context.startService(intent)
+                        }
                 )
             }
         }
