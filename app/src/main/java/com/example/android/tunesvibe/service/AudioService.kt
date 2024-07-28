@@ -1,228 +1,318 @@
 package com.example.android.tunesvibe.service
 
-import android.app.Service
+import android.app.Notification
+import android.app.PendingIntent
 import android.content.Intent
-import android.media.AudioManager
-import android.media.MediaPlayer
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
+import androidx.core.content.ContextCompat
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSessionService
+import androidx.media3.ui.PlayerNotificationManager
+import androidx.media3.ui.PlayerNotificationManager.MediaDescriptionAdapter
+import com.example.android.tunesvibe.R
 import com.example.android.tunesvibe.data.model.Audio
 import com.example.android.tunesvibe.data.repository.AudioRepository
+import com.example.android.tunesvibe.utils.NOTIFICATION_CHANNEL_ID
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+
+@UnstableApi
 @AndroidEntryPoint
-class AudioService : Service(),
-    MediaPlayer.OnCompletionListener,
-    MediaPlayer.OnErrorListener,
-    MediaPlayer.OnPreparedListener,
-//    MediaPlayer.OnSeekCompleteListener,
-    MediaPlayer.OnInfoListener,
-    MediaPlayer.OnBufferingUpdateListener,
-    AudioManager.OnAudioFocusChangeListener {
+class AudioService : MediaSessionService() {
 
     @Inject
-    lateinit var repository: AudioRepository
-
-//    private val _audiosList = MutableStateFlow<List<Audio>>(emptyList())
-//    private val audiosList: StateFlow<List<Audio>> get() = _audiosList
+    lateinit var audioRepository: AudioRepository
 
     private val binder = LocalBinder()
+    private lateinit var player: ExoPlayer
+    private lateinit var mediaSession: MediaSession
+    private lateinit var playerNotificationManager: PlayerNotificationManager
+    private var _duration = MutableStateFlow(0L)
+    val duration: StateFlow<Long> get() = _duration
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var _duration = MutableStateFlow(0)
-    val duration: StateFlow<Int> get() = _duration
-    private var _currentPosition = MutableStateFlow(0)
-    val currentPosition: StateFlow<Int> get() = _currentPosition
+    private var _currentPosition = MutableStateFlow(0L)
+    val currentPosition: StateFlow<Long> get() = _currentPosition
+
     private var _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> get() = _isPlaying
-    private var _currentSongIndex = MutableStateFlow(0)
-    val currentSongIndex: StateFlow<Int> get() = _currentSongIndex
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    override fun onBind(p0: Intent?): IBinder {
-        return binder
+    private var _currentIndex = MutableStateFlow(0)
+    val currentIndex: StateFlow<Int> get() = _currentIndex
+
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    override fun onCreate() {
+        super.onCreate()
+        player = ExoPlayer.Builder(this).build()
+        val sessionActivityIntent = packageManager.getLaunchIntentForPackage(packageName).let {
+            PendingIntent.getActivity(
+                this,
+                0,
+                it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+        mediaSession = MediaSession
+            .Builder(this, player)
+            .setSessionActivity(sessionActivityIntent)
+            .build()
+
+        playerNotificationManager = PlayerNotificationManager.Builder(
+            this,
+            1,
+            NOTIFICATION_CHANNEL_ID
+        )
+            .setMediaDescriptionAdapter(object : MediaDescriptionAdapter {
+                override fun getCurrentContentTitle(player: Player): CharSequence {
+                    return player.currentMediaItem?.mediaMetadata?.title ?: "Title"
+                }
+
+                override fun createCurrentContentIntent(player: Player): PendingIntent? {
+                    return sessionActivityIntent
+                }
+
+                override fun getCurrentContentText(player: Player): CharSequence {
+                    return player.currentMediaItem?.mediaMetadata?.artist ?: "Artist"
+                }
+
+                override fun getCurrentLargeIcon(
+                    player: Player,
+                    callback: PlayerNotificationManager.BitmapCallback
+                ): Bitmap? {
+                    val bitmapDrawable = ContextCompat.getDrawable(this@AudioService, R.drawable.music_background) as BitmapDrawable
+                    return if(player.currentMediaItem?.mediaMetadata?.artworkUri != null) {
+                        null
+                    } else {
+                        bitmapDrawable.bitmap
+                    }
+                }
+            })
+            .setNotificationListener(object : PlayerNotificationManager.NotificationListener {
+                override fun onNotificationCancelled(
+                    notificationId: Int,
+                    dismissedByUser: Boolean
+                ) {
+                    super.onNotificationCancelled(notificationId, dismissedByUser)
+                    stopSelf()
+                    stopForeground(notificationId)
+                }
+
+                override fun onNotificationPosted(
+                    notificationId: Int,
+                    notification: Notification,
+                    ongoing: Boolean
+                ) {
+                    super.onNotificationPosted(notificationId, notification, ongoing)
+                    startForeground(notificationId, notification)
+                }
+
+            })
+            .build()
+        val audiosList = audioRepository.retrieveSongs().value
+        loadAudioList(audiosList)
+
+        playerNotificationManager.setPlayer(player)
+        playerNotificationManager.setUseNextAction(true)
+        playerNotificationManager.setUsePreviousAction(true)
+        playerNotificationManager.setUseFastForwardAction(true)
+        playerNotificationManager.setMediaSessionToken(mediaSession.sessionCompatToken)
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_READY -> {
+                        scope.launch {
+                            _duration.value = player.duration / 1000
+                            updateAudioStates()
+                        }
+                    }
+
+                    Player.STATE_IDLE -> {
+
+                    }
+
+                    Player.STATE_BUFFERING -> {
+
+                    }
+
+                    Player.STATE_ENDED -> {
+                        restartPlayList()
+                    }
+                }
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                super.onMediaItemTransition(mediaItem, reason)
+                scope.launch {
+                    delay(500)
+                    _duration.value = player.duration / 1000
+                }
+                scope.launch {
+                    _currentIndex.value = player.currentMediaItemIndex
+                    _currentPosition.value = 0
+                }
+            }
+
+
+        })
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession {
+        return mediaSession
     }
 
     inner class LocalBinder : Binder() {
         fun getService(): AudioService = this@AudioService
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        Log.d("AudioService", "onCreate:")
-        initMediaPlayer()
+    override fun onBind(intent: Intent?): IBinder {
+        super.onBind(intent)
+        return binder
     }
 
-    init {
-        if (mediaPlayer == null) {
-            initMediaPlayer()
-        }
+    override fun onDestroy() {
+        super.onDestroy()
+        player.release()
+        playerNotificationManager.setPlayer(null)
+        mediaSession.release()
+        stopSelf()
+        scope.cancel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         val action = intent?.action
         when (action) {
             ACTIONS.PLAY.toString() -> {
-                val songUri = intent.getStringExtra("songUri")
-                val index = intent.getIntExtra("index", 0)
-                _currentSongIndex.value = index
-                if (songUri != null) {
-                    playAudio(songUri)
-                    _isPlaying.value = true
+                val audioIndex = intent.getIntExtra("index", -1)
+                if (audioIndex != -1) {
+                    playAudio(audioIndex)
                 }
             }
 
-            ACTIONS.PAUSE.toString() -> {
-                pauseAudio()
-                _isPlaying.value = false
-            }
+            ACTIONS.PAUSE.toString() -> pauseAudio()
 
-            ACTIONS.RESUME.toString() -> {
-                resumeAudio()
-                _isPlaying.value = true
-            }
+            ACTIONS.RESUME.toString() -> resumeAudio()
 
-            ACTIONS.STOP.toString() -> {
-                stopAudio()
-                _isPlaying.value = false
-            }
+            ACTIONS.SKIP_NEXT.toString() -> skipNext()
 
-            ACTIONS.SKIP_NEXT.toString() -> {
-                skipNext()
-                _isPlaying.value = true
-            }
-
-            ACTIONS.SKIP_PREVIOUS.toString() -> {
-                skipPrevious()
-                _isPlaying.value = true
-            }
+            ACTIONS.SKIP_PREVIOUS.toString() -> skipPrevious()
         }
         return START_STICKY
     }
 
-    override fun onCompletion(p0: MediaPlayer?) {
-        stopAudio()
-        stopSelf()
-    }
-
-    override fun onError(p0: MediaPlayer?, p1: Int, p2: Int): Boolean {
-        TODO("Not yet implemented")
-    }
-
-    override fun onPrepared(mediaPlayer: MediaPlayer?) {
-        _duration.value = mediaPlayer?.duration?.div(1000) ?: 0
-        mediaPlayer?.start()
-        startUpdatingCurrentPosition()
-    }
-
-    override fun onInfo(p0: MediaPlayer?, p1: Int, p2: Int): Boolean {
-        TODO("Not yet implemented")
-    }
-
-    override fun onBufferingUpdate(p0: MediaPlayer?, p1: Int) {
-        TODO("Not yet implemented")
-    }
-
-    override fun onAudioFocusChange(p0: Int) {
-        TODO("Not yet implemented")
-    }
-
-    private fun initMediaPlayer() {
-        mediaPlayer = MediaPlayer()
-
-        mediaPlayer?.setOnCompletionListener(this)
-        mediaPlayer?.setOnErrorListener(this)
-        mediaPlayer?.setOnPreparedListener(this)
-        mediaPlayer?.setOnInfoListener(this)
-        mediaPlayer?.setOnBufferingUpdateListener(this)
-
-        mediaPlayer?.reset()
-        mediaPlayer?.setAudioStreamType(AudioManager.STREAM_MUSIC)
-    }
-
-    private fun playAudio(songUri: String) {
-        if (mediaPlayer?.isPlaying == true || (mediaPlayer?.currentPosition ?: 0) > 0) {
-            mediaPlayer?.stop()
-            mediaPlayer?.reset()
+    private fun playAudio(index: Int) {
+        if (index == player.currentMediaItemIndex) return
+        if (index in 0 until player.mediaItemCount) {
+            player.seekTo(index, 0)
+            player.play()
         } else {
-            mediaPlayer?.reset()
+            Log.e("AudioService", "Invalid index")
         }
-
-        mediaPlayer?.apply {
-            setDataSource(songUri)
-            prepareAsync()
-        }
+        getCurrentIndex()
     }
 
-    private fun stopAudio() {
-        if (mediaPlayer == null) return
-        if (mediaPlayer?.isPlaying == true) mediaPlayer?.stop()
+    private fun loadAudioList(audioList: List<Audio>) {
+        val mediaItems = audioList.map {
+            createMediaItem(
+                it.data,
+                it.title,
+                it.artist,
+                it.albumArtUri
+            )
+        }
+        player.setMediaItems(mediaItems)
+        player.prepare()
+    }
+
+    private fun createMediaItem(audioUri:String, title:String, artist:String, artWorkUri: Uri?) :MediaItem{
+        return MediaItem.Builder()
+            .setUri(audioUri)
+            .setMediaMetadata(MediaMetadata.Builder()
+                .setTitle(title)
+                .setArtist(artist)
+                .setArtworkUri(artWorkUri)
+                .build()
+            )
+            .build()
     }
 
     private fun pauseAudio() {
-        if (mediaPlayer?.isPlaying == true) {
-            mediaPlayer?.pause()
-        }
+        player.pause()
     }
 
     private fun resumeAudio() {
-        if (mediaPlayer?.isPlaying == false) {
-            mediaPlayer?.start()
-        }
-        startUpdatingCurrentPosition()
+        player.play()
+        updateAudioStates()
     }
 
-    private fun startUpdatingCurrentPosition() {
-        serviceScope.launch {
-            while (mediaPlayer != null && mediaPlayer?.isPlaying == true) {
-                _currentPosition.value = mediaPlayer?.currentPosition?.div(1000) ?: 0
+    private fun skipNext() {
+        getCurrentIndex()
+        if (_currentIndex.value == player.mediaItemCount - 1) {
+            player.seekTo(0, C.TIME_UNSET)
+        } else {
+            player.seekToNextMediaItem()
+        }
+    }
+
+    private fun skipPrevious() {
+        getCurrentIndex()
+        if (_currentIndex.value == 0) {
+            player.seekTo(player.mediaItemCount - 1, C.TIME_UNSET)
+        } else {
+            player.seekToPreviousMediaItem()
+
+        }
+    }
+
+    private fun restartPlayList() {
+        player.seekTo(0, C.TIME_UNSET)
+        player.play()
+    }
+
+    private fun updateAudioStates() {
+        scope.launch {
+            while (true) {
+                _currentPosition.value = player.currentPosition / 1000
+                _isPlaying.value = player.isPlaying
                 delay(1000)
             }
         }
     }
 
-    fun seekTo(position: Float) {
-        mediaPlayer?.seekTo((position * 1000).toInt())
+    fun isPlaying() {
+        _isPlaying.value = player.isPlaying
     }
 
-    private fun skipNext() {
-        val audios = repository.retrieveSongs().value
-        if (_currentSongIndex.value < audios.size - 1) {
-            _currentSongIndex.value++
-            playAudio(audios[_currentSongIndex.value].data)
-        } else {
-            _currentSongIndex.value = 0
-            playAudio(audios[_currentSongIndex.value].data)
-        }
+    fun seekTo(value: Float) {
+        player.seekTo(value.toLong() * 1000)
+        player.play()
+        getCurrentIndex()
     }
 
-    private fun skipPrevious() {
-        val audios = repository.retrieveSongs().value
-        if (currentSongIndex.value > 0) {
-            _currentSongIndex.value--
-            playAudio(audios[currentSongIndex.value].data)
-        } else {
-            _currentSongIndex.value = audios.size - 1
-            playAudio(audios[currentSongIndex.value].data)
-        }
+    private fun getCurrentIndex() {
+        _currentIndex.value = player.currentMediaItemIndex
     }
 
     enum class ACTIONS {
-        PLAY,
-        PAUSE,
-        RESUME,
-        STOP,
-        SKIP_NEXT,
-        SKIP_PREVIOUS
+        PLAY, PAUSE, RESUME, SKIP_NEXT, SKIP_PREVIOUS
     }
-
 }

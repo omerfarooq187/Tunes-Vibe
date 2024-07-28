@@ -25,8 +25,10 @@ android {
     }
 
     buildTypes {
+
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -93,4 +95,10 @@ dependencies {
 
     //coil
     implementation(libs.coil.compose)
+
+    implementation(libs.androidx.media)
+    implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.media3.ui)
+
+    implementation(libs.androidx.media3.exoplayer)
 }
